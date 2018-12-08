@@ -1,10 +1,9 @@
 # -*- coding:utf-8 -*-
-from __future__ import print_function
+# from __future__ import print_function
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.autograd import Variable
-import matplotlib.pyplot as plt
-import matplotlib.image as mpimg
+from torchvision.utils import save_image
 from util import log_sum_exp
 from torch.utils.data import DataLoader, TensorDataset
 import sys
@@ -15,15 +14,21 @@ import pdb
 # import tensorboardX
 import os
 
+#
+
 
 class ImprovedGAN(object):
     def __init__(self, G, D, labeled, unlabeled, test, args):
-
-        # os.makedirs(args.savedir)
-        self.G = G
-        self.D = D
-        #torch.save(self.G, os.path.join(args.savedir, 'G.pkl'))
-        #torch.save(self.D, os.path.join(args.savedir, 'D.pkl'))
+        if os.path.exists(args.savedir):
+            print('Loading model from ' + args.savedir)
+            self.G = torch.load(os.path.join(args.savedir, 'G.pkl'))
+            self.D = torch.load(os.path.join(args.savedir, 'D.pkl'))
+        else:
+            os.makedirs(args.savedir)
+            self.G = G
+            self.D = D
+            torch.save(self.G, os.path.join(args.savedir, 'G.pkl'))
+            torch.save(self.D, os.path.join(args.savedir, 'D.pkl'))
         # self.writer = tensorboardX.SummaryWriter(log_dir=args.logdir)
         if args.cuda:
             self.G.cuda()
@@ -70,11 +75,13 @@ class ImprovedGAN(object):
         self.Doptim.zero_grad()
         loss.backward()
         self.Goptim.step()
-        return loss.data.cpu().numpy()
+        return loss.data.cpu().numpy(),fake
 
     def train(self):
         assert type(self.labeled) == TensorDataset
         gn = 0
+	losses_gen = []
+        accuracy_track = []
         train_loss_u = []
         train_loss_s = []
         for epoch in range(self.args.epochs):
@@ -99,10 +106,11 @@ class ImprovedGAN(object):
                 loss_supervised += ll
                 loss_unsupervised += lu
                 accuracy += acc
-                lg = self.trainG(unlabel2)
+                lg,gen_imgs = self.trainG(unlabel2)
                 if epoch > 1 and lg > 1:
                     #                    pdb.set_trace()
-                    lg = self.trainG(unlabel2)
+                    lg, gen_imgs = self.trainG(unlabel2)
+
                 loss_gen += lg
                 if (batch_num + 1) % self.args.log_interval == 0:
                     print('Training: %d / %d' % (batch_num + 1, len(unlabel_loader1)))
@@ -124,24 +132,73 @@ class ImprovedGAN(object):
             loss_unsupervised /= batch_num
             loss_gen /= batch_num
             accuracy /= batch_num
+            accuracy_track.append((epoch,accuracy))
+            losses_gen.append((epoch,loss_gen))
             train_loss_s.append((epoch,loss_supervised))
             train_loss_u.append((epoch,loss_unsupervised))
             print("Iteration %d, loss_supervised = %.4f, loss_unsupervised = %.4f, loss_gen = %.4f train acc = %.4f" % (
             epoch, loss_supervised, loss_unsupervised, loss_gen, accuracy))
             sys.stdout.flush()
+            if (epoch + 1) % self.args.eval_interval == 0:
+                print("Eval: correct %d / %d" % (self.eval(), self.test.__len__()))
+                torch.save(self.G, os.path.join(args.savedir, 'G.pkl'))
+                torch.save(self.D, os.path.join(args.savedir, 'D.pkl'))
+                save_image(gen_imgs.data[:25], 'images/%d.png' % epoch, nrow=5)
+	accuracy_track = np.asarray(accuracy_track)
+	filename = 'accuracy'
+	outfile = open(filename,'wb')
+	pickle.dump(accuracy_track,outfile)
+	outfile.close()
+
         train_loss_s = np.asarray(train_loss_s)
+	filename = 'train_loss_s'
+	outfile = open(filename,'wb')
+	pickle.dump(train_loss_s,outfile)
+	outfile.close()
+
         train_loss_u = np.asarray(train_loss_u)
-        plt.plot(train_loss_s[:, 0],train_loss_s[:, 1])
-        plt.plot(train_loss_u[:, 0],train_loss_u[:, 1])
+	filename = 'train_loss_u'
+	outfile = open(filename,'wb')
+	pickle.dump(train_loss_u,outfile)
+	outfile.close()
+
+        losses_gen = np.asarray(losses_gen)
+	filename = 'losses_gen'
+	outfile = open(filename,'wb')
+	pickle.dump(losses_gen,outfile)
+	outfile.close()
+
+
+	plt.plot(losses_gen[:, 0],losses_gen[:, 1])
+        plt.suptitle('Gen Loss')
+        plt.xlabel('epoch')
+        plt.ylabel('Gen loss')
         plt.show()
-            #if (epoch + 1) % self.args.eval_interval == 0:
-                #print("Eval: correct %d / %d" % (self.eval(), self.test.__len__()))
-                #torch.save(self.G, os.path.join(args.savedir, 'G.pkl'))
-                #torch.save(self.D, os.path.join(args.savedir, 'D.pkl'))
+
+	plt.plot(accuracy_track[:, 0],accuracy_train[:, 1])
+        plt.suptitle('Accuracy')
+        plt.xlabel('epoch')
+        plt.ylabel('accuracy')
+        plt.show()
+
+
+        plt.plot(train_loss_s[:, 0],train_loss_s[:, 1])
+        plt.suptitle('Supervised loss')
+        plt.xlabel('epoch')
+        plt.ylabel('Train Loss Supervised')
+        plt.show()
+
+        plt.plot(train_loss_u[:, 0],train_loss_u[:, 1])
+        plt.suptitle('UnSupervised loss')
+        plt.xlabel('epoch')
+        plt.ylabel('Train Loss UnSupervised')
+        plt.show()
+
+
+
 
     def predict(self, x):
-        with torch.no_grad:
-            output = torch.max(self.D(Variable(x), cuda=self.args.cuda), 1)[1].data
+        output = torch.max(self.D(Variable(x), cuda=self.args.cuda), 1)[1].data
         return output
 
     def eval(self):
@@ -167,8 +224,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='PyTorch Improved GAN')
     parser.add_argument('--batch-size', type=int, default=100, metavar='N',
                         help='input batch size for training (default: 64)')
-    parser.add_argument('--epochs', type=int, default=10, metavar='N',
-                        help='number of epochs to train (default: 10)')
+    parser.add_argument('--epochs', type=int, default=200, metavar='N',
+                        help='number of epochs to train (default: 200)')
     parser.add_argument('--lr', type=float, default=0.003, metavar='LR',
                         help='learning rate (default: 0.003)')
     parser.add_argument('--momentum', type=float, default=0.5, metavar='M',
